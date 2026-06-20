@@ -1,0 +1,22 @@
+################################################################################
+# To build the image do this:
+# docker build -f Dockerfile.peer.debug -t fabric-peer-debug .
+################################################################################
+
+FROM golang:latest
+
+# Install Delve
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Fabric directories
+WORKDIR /opt/gopath/src/github.com/hyperledger/fabric
+
+# Copy debug orderer binary
+COPY build/bin/peer /usr/local/bin/peer
+
+# Expose peer + Delve ports
+EXPOSE 7051 2346
+
+# Run orderer under Delve		
+ENTRYPOINT ["dlv", "exec", "/usr/local/bin/peer", "--headless", "--listen=0.0.0.0:2346", "--api-version=2", "--accept-multiclient", "--", "node", "start"]
+

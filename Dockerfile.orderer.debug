@@ -1,0 +1,26 @@
+################################################################################
+# To build the image do this:
+# docker build -f Dockerfile.orderer.debug -t fabric-orderer-debug .
+################################################################################
+
+FROM golang:latest
+
+# Install Delve
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Fabric directories
+WORKDIR /opt/gopath/src/github.com/hyperledger/fabric
+
+# Copy debug orderer binary
+COPY build/bin/orderer /usr/local/bin/orderer
+
+# Expose orderer + Delve ports
+EXPOSE 7050 7053 2345
+
+# Run orderer under Delve
+ENTRYPOINT ["dlv", "exec", "/usr/local/bin/orderer", \
+            "--headless", \
+            "--listen=:2345", \
+            "--api-version=2", \
+            "--accept-multiclient"]
+
