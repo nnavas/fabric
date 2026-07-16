@@ -575,6 +575,14 @@ func (g *Node) gossipBatch(msgs []*emittedGossipMessage) {
 	}
 }
 
+func (g *Node) remotePeersFromMembership(members []discovery.NetworkMember) []*comm.RemotePeer {
+	peers := make([]*comm.RemotePeer, 0, len(members))
+	for _, member := range members {
+		peers = append(peers, &comm.RemotePeer{PKIID: member.PKIid, Endpoint: member.PreferredEndpoint()})
+	}
+	return peers
+}
+
 func (g *Node) sendAndFilterSecrets(msg *protoext.SignedGossipMessage, peers ...*comm.RemotePeer) {
 	for _, peer := range peers {
 		// Prevent forwarding alive messages of external organizations
@@ -603,7 +611,20 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 	if len(messages) == 0 {
 		return
 	}
-	totalChannels := extractChannels(messages)
+
+	remainingMessages := make([]*emittedGossipMessage, 0, len(messages))
+	for _, msg := range messages {
+		if protoext.IsDataMsg(msg.GossipMessage) && g.spanningTree != nil {
+			peers2Send := g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
+			if len(peers2Send) > 0 {
+				g.comm.Send(msg.SignedGossipMessage, peers2Send...)
+				continue
+			}
+		}
+		remainingMessages = append(remainingMessages, msg)
+	}
+
+	totalChannels := extractChannels(remainingMessages)
 	var channel common.ChannelID
 	var messagesOfChannel []*emittedGossipMessage
 	for len(totalChannels) > 0 {
@@ -613,7 +634,7 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 		grabMsgs := func(o interface{}) bool {
 			return bytes.Equal(o.(*emittedGossipMessage).Channel, channel)
 		}
-		messagesOfChannel, messages = partitionMessages(grabMsgs, messages)
+		messagesOfChannel, remainingMessages = partitionMessages(grabMsgs, remainingMessages)
 		if len(messagesOfChannel) == 0 {
 			continue
 		}
