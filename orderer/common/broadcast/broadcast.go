@@ -8,6 +8,7 @@ package broadcast
 
 import (
 	"io"
+	"log"
 	"time"
 
 	"github.com/hyperledger/fabric-lib-go/common/flogging"
@@ -64,6 +65,7 @@ type Handler struct {
 
 // Handle reads requests from a Broadcast stream, processes them, and returns the responses to the stream
 func (bh *Handler) Handle(srv ab.AtomicBroadcast_BroadcastServer) error {
+	log.Println("NN ---> Handling broadcasts")
 	addr := util.ExtractRemoteAddress(srv.Context())
 	logger.Debugf("Starting new broadcast loop for %s", addr)
 	for {
