@@ -66,6 +66,7 @@ type Node struct {
 	stateInfoMsgStore msgstore.MessageStore
 	certPuller        pull.Mediator
 	gossipMetrics     *metrics.GossipMetrics
+	spanningTree      *spanningTreeState
 }
 
 // New creates a gossip instance attached to a gRPC server
@@ -94,6 +95,7 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		gossipMetrics:         gossipMetrics,
 	}
 	g.stateInfoMsgStore = g.newStateInfoMsgStore()
+	g.spanningTree = newSpanningTreeState()
 
 	g.idMapper = identity.NewIdentityMapper(mcs, selfIdentity, func(pkiID common.PKIidType, identity api.PeerIdentityType) {
 		// Identities which are purged from the membership store
@@ -411,8 +413,41 @@ func (g *Node) handleMessage(m protoext.ReceivedMessage) {
 		g.forwardDiscoveryMsg(m)
 	}
 
+	if protoext.IsSpanningTreeMsg(msg.GossipMessage) {
+		g.handleSpanningTreeMessage(m)
+		return
+	}
+
 	if protoext.IsPullMsg(msg.GossipMessage) && protoext.GetPullMsgType(msg.GossipMessage) == pg.PullMsgType_IDENTITY_MSG {
 		g.certStore.handleMessage(m)
+	}
+}
+
+func (g *Node) handleSpanningTreeMessage(m protoext.ReceivedMessage) {
+	if m == nil || m.GetGossipMessage() == nil {
+		return
+	}
+
+	msg := m.GetGossipMessage().GossipMessage
+	if msg == nil {
+		return
+	}
+
+	sender := []byte{}
+	if m.GetConnectionInfo() != nil {
+		sender = append(sender, m.GetConnectionInfo().ID...)
+	}
+
+	if g.spanningTree.handle(msg, sender) {
+		g.logger.Debugf("Updated spanning-tree parent to %x", sender)
+		if g.conf.PropagateIterations > 0 {
+			g.emitter.Add(&emittedGossipMessage{
+				SignedGossipMessage: m.GetGossipMessage(),
+				filter: func(id common.PKIidType) bool {
+					return !bytes.Equal(id, sender)
+				},
+			})
+		}
 	}
 }
 

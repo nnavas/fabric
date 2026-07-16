@@ -124,6 +124,11 @@ func IsLeadershipMsg(m *gossip.GossipMessage) bool {
 	return m.GetLeadershipMsg() != nil
 }
 
+// IsSpanningTreeMsg returns whether this GossipMessage is a spanning-tree control message.
+func IsSpanningTreeMsg(m *gossip.GossipMessage) bool {
+	return m.GetSpanningTree() != nil
+}
+
 // IsTagLegal checks the GossipMessage tags and inner type
 // and returns an error if the tag doesn't match the type.
 func IsTagLegal(m *gossip.GossipMessage) error {
@@ -178,6 +183,13 @@ func IsTagLegal(m *gossip.GossipMessage) error {
 	if IsLeadershipMsg(m) {
 		if m.Tag != gossip.GossipMessage_CHAN_AND_ORG {
 			return fmt.Errorf("Tag should be %s", gossip.GossipMessage_Tag_name[int32(gossip.GossipMessage_CHAN_AND_ORG)])
+		}
+		return nil
+	}
+
+	if IsSpanningTreeMsg(m) {
+		if m.Tag != gossip.GossipMessage_EMPTY {
+			return fmt.Errorf("Tag should be %s", gossip.GossipMessage_Tag_name[int32(gossip.GossipMessage_EMPTY)])
 		}
 		return nil
 	}
