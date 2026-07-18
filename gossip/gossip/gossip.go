@@ -20,6 +20,10 @@ import (
 type emittedGossipMessage struct {
 	*protoext.SignedGossipMessage
 	filter func(id common.PKIidType) bool
+
+	// If true, this message should be forwarded only to peers selected
+	// from the locally computed spanning tree.
+	routeViaSpanningTree bool
 }
 
 // SendCriteria defines how to send a specific message

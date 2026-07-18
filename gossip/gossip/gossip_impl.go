@@ -614,12 +614,26 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 
 	remainingMessages := make([]*emittedGossipMessage, 0, len(messages))
 	for _, msg := range messages {
-		if protoext.IsDataMsg(msg.GossipMessage) && g.spanningTree != nil {
-			peers2Send := g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
+		if msg.routeViaSpanningTree && g.spanningTree != nil {
+			var peers2Send []*comm.RemotePeer
+			if len(msg.Channel) > 0 {
+				gc := g.chanState.getGossipChannelByChainID(msg.Channel)
+				if gc != nil {
+					membership := g.disc.GetMembership()
+					eligiblePeers := filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
+					peers2Send = g.spanningTree.selectPeers(eligiblePeers)
+				}
+			} else {
+				peers2Send = g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
+			}
 			if len(peers2Send) > 0 {
-				g.comm.Send(msg.SignedGossipMessage, peers2Send...)
+				filteredPeers := g.removeSelfLoop(msg, peers2Send)
+				g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
 				continue
 			}
+			// If the spanning tree has no eligible child peers for this message,
+			// do not fall back to the unrestricted channel fan-out.
+			continue
 		}
 		remainingMessages = append(remainingMessages, msg)
 	}
@@ -721,6 +735,15 @@ func (g *Node) SendByCriteria(msg *protoext.SignedGossipMessage, criteria SendCr
 	return nil
 }
 
+func (g *Node) shouldRouteViaSpanningTree(msg *pg.GossipMessage) bool {
+	if g.spanningTree == nil || msg == nil || !protoext.IsDataMsg(msg) {
+		return false
+	}
+
+	dataMsg := msg.GetDataMsg()
+	return dataMsg != nil && dataMsg.Payload != nil && len(msg.Channel) > 0
+}
+
 // Gossip sends a message to other peers to the network
 func (g *Node) Gossip(msg *pg.GossipMessage) {
 	// Educate developers to Gossip messages with the right tags.
@@ -766,6 +789,7 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 		filter: func(_ common.PKIidType) bool {
 			return true
 		},
+		routeViaSpanningTree: g.shouldRouteViaSpanningTree(msg),
 	})
 }
 

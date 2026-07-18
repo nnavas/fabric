@@ -164,9 +164,15 @@ func (ga *gossipAdapterImpl) Gossip(msg *protoext.SignedGossipMessage) {
 
 // Forward sends message to the next hops
 func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
+	gossipMsg := msg.GetGossipMessage()
+	if gossipMsg == nil || gossipMsg.GossipMessage == nil {
+		return
+	}
+
 	ga.Node.emitter.Add(&emittedGossipMessage{
-		SignedGossipMessage: msg.GetGossipMessage(),
+		SignedGossipMessage: gossipMsg,
 		filter:              msg.GetConnectionInfo().ID.IsNotSameFilter,
+		routeViaSpanningTree: ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage),
 	})
 }
 
