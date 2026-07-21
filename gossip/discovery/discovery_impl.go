@@ -86,7 +86,7 @@ type DiscoveryConfig struct {
 	MsgExpirationFactor          int
 	BootstrapPeers               []string
 	// NN: EnableSpanningTree indicates whether the discovery service should use a spanning tree for message dissemination
-	EnableSpanningTree           bool
+	EnableSpanningTree bool
 }
 
 // NewDiscoveryService returns a new discovery service with the comm module passed and the crypto service passed

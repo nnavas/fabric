@@ -109,12 +109,12 @@ help: ## List all commands with documentation
 	@awk 'BEGIN {FS = ":.*?## "}; /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: all
-all: ## Builds all targets and runs all non-integration tests/checks
-	check-go-version native docker checks
+all: check-go-version native docker checks ## Builds all targets and runs all non-integration tests/checks
+	
 
 .PHONY: checks
-checks: ## Runs basic checks along with unit and integration tests
-	basic-checks unit-test integration-test
+checks: basic-checks unit-test integration-test ## Runs basic checks along with unit and integration tests
+	
 
 .PHONY: basic-checks
 basic-checks: check-go-version license spelling references trailing-spaces linter check-help-docs check-metrics-doc filename-spaces check-swagger ## Performs basic checks like license, spelling, trailing spaces and linter

@@ -170,8 +170,8 @@ func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
 	}
 
 	ga.Node.emitter.Add(&emittedGossipMessage{
-		SignedGossipMessage: gossipMsg,
-		filter:              msg.GetConnectionInfo().ID.IsNotSameFilter,
+		SignedGossipMessage:  gossipMsg,
+		filter:               msg.GetConnectionInfo().ID.IsNotSameFilter,
 		routeViaSpanningTree: ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage),
 	})
 }

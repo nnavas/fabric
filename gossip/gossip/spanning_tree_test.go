@@ -1,3 +1,9 @@
+/*
+Copyright IBM Corp. All Rights Reserved.
+
+SPDX-License-Identifier: Apache-2.0
+*/
+
 package gossip
 
 import (
@@ -22,12 +28,12 @@ func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
 	first := &pg.GossipMessage{
 		Content: &pg.GossipMessage_SpanningTree{
 			SpanningTree: &pg.SpanningTreeMsg{
-				RootPkiId: []byte("root"),
-				RootIncNum: 1,
-				RootSeqNum: 1,
-				Distance:  1,
+				RootPkiId:   []byte("root"),
+				RootIncNum:  1,
+				RootSeqNum:  1,
+				Distance:    1,
 				SenderPkiId: []byte("peer-a"),
-				PathCost: 10,
+				PathCost:    10,
 			},
 		},
 	}
@@ -39,12 +45,12 @@ func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
 	better := &pg.GossipMessage{
 		Content: &pg.GossipMessage_SpanningTree{
 			SpanningTree: &pg.SpanningTreeMsg{
-				RootPkiId: []byte("root"),
-				RootIncNum: 1,
-				RootSeqNum: 1,
-				Distance:  0,
+				RootPkiId:   []byte("root"),
+				RootIncNum:  1,
+				RootSeqNum:  1,
+				Distance:    0,
 				SenderPkiId: []byte("peer-b"),
-				PathCost: 1,
+				PathCost:    1,
 			},
 		},
 	}
@@ -77,8 +83,8 @@ func TestSpanningTreeStateSelectsChildPeersForData(t *testing.T) {
 func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testing.T) {
 	node := &Node{
 		spanningTree: newSpanningTreeState(),
-		conf: &Config{PropagateIterations: 1},
-		logger: util.GetLogger(util.GossipLogger, "test"),
+		conf:         &Config{PropagateIterations: 1},
+		logger:       util.GetLogger(util.GossipLogger, "test"),
 	}
 	node.spanningTree.children[string([]byte("peer-a"))] = struct{}{}
 	node.spanningTree.children[string([]byte("peer-b"))] = struct{}{}
@@ -92,7 +98,7 @@ func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testi
 				},
 			},
 		},
-		filter: func(_ common.PKIidType) bool { return true },
+		filter:               func(_ common.PKIidType) bool { return true },
 		routeViaSpanningTree: true,
 	}
 
@@ -131,16 +137,17 @@ func (m *mockComm) Send(msg *protoext.SignedGossipMessage, peers ...*comm.Remote
 		m.sendFn(msg, peers...)
 	}
 }
+
 func (m *mockComm) SendWithAck(msg *protoext.SignedGossipMessage, _ time.Duration, _ int, peers ...*comm.RemotePeer) comm.AggregatedSendResult {
 	return nil
 }
-func (m *mockComm) Probe(peer *comm.RemotePeer) error { return nil }
+func (m *mockComm) Probe(peer *comm.RemotePeer) error                             { return nil }
 func (m *mockComm) Handshake(peer *comm.RemotePeer) (api.PeerIdentityType, error) { return nil, nil }
 func (m *mockComm) Accept(common.MessageAcceptor) <-chan protoext.ReceivedMessage { return nil }
-func (m *mockComm) PresumedDead() <-chan common.PKIidType { return nil }
-func (m *mockComm) IdentitySwitch() chan common.PKIidType { return nil }
-func (m *mockComm) CloseConn(peer *comm.RemotePeer) {}
-func (m *mockComm) Stop() {}
+func (m *mockComm) PresumedDead() <-chan common.PKIidType                         { return nil }
+func (m *mockComm) IdentitySwitch() chan common.PKIidType                         { return nil }
+func (m *mockComm) CloseConn(peer *comm.RemotePeer)                               {}
+func (m *mockComm) Stop()                                                         {}
 
 type mockDiscovery struct {
 	discovery.Discovery
@@ -153,14 +160,16 @@ type mockGossipChannel struct{}
 
 func (m *mockGossipChannel) Self() *protoext.SignedGossipMessage { return nil }
 func (m *mockGossipChannel) GetPeers() []discovery.NetworkMember { return nil }
-func (m *mockGossipChannel) PeerFilter(api.SubChannelSelectionCriteria) filter.RoutingFilter { return nil }
-func (m *mockGossipChannel) IsMemberInChan(discovery.NetworkMember) bool { return true }
-func (m *mockGossipChannel) UpdateLedgerHeight(uint64) {}
-func (m *mockGossipChannel) UpdateChaincodes([]*pg.Chaincode) {}
-func (m *mockGossipChannel) IsOrgInChannel(api.OrgIdentityType) bool { return true }
+func (m *mockGossipChannel) PeerFilter(api.SubChannelSelectionCriteria) filter.RoutingFilter {
+	return nil
+}
+func (m *mockGossipChannel) IsMemberInChan(discovery.NetworkMember) bool     { return true }
+func (m *mockGossipChannel) UpdateLedgerHeight(uint64)                       {}
+func (m *mockGossipChannel) UpdateChaincodes([]*pg.Chaincode)                {}
+func (m *mockGossipChannel) IsOrgInChannel(api.OrgIdentityType) bool         { return true }
 func (m *mockGossipChannel) EligibleForChannel(discovery.NetworkMember) bool { return true }
-func (m *mockGossipChannel) HandleMessage(protoext.ReceivedMessage) {}
-func (m *mockGossipChannel) AddToMsgStore(*protoext.SignedGossipMessage) {}
-func (m *mockGossipChannel) ConfigureChannel(api.JoinChannelMessage) {}
-func (m *mockGossipChannel) LeaveChannel() {}
-func (m *mockGossipChannel) Stop() {}
+func (m *mockGossipChannel) HandleMessage(protoext.ReceivedMessage)          {}
+func (m *mockGossipChannel) AddToMsgStore(*protoext.SignedGossipMessage)     {}
+func (m *mockGossipChannel) ConfigureChannel(api.JoinChannelMessage)         {}
+func (m *mockGossipChannel) LeaveChannel()                                   {}
+func (m *mockGossipChannel) Stop()                                           {}
