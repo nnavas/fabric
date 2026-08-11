@@ -95,7 +95,6 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		gossipMetrics:         gossipMetrics,
 	}
 	g.stateInfoMsgStore = g.newStateInfoMsgStore()
-	g.spanningTree = newSpanningTreeState()
 
 	g.idMapper = identity.NewIdentityMapper(mcs, selfIdentity, func(pkiID common.PKIidType, identity api.PeerIdentityType) {
 		// Identities which are purged from the membership store
@@ -148,6 +147,7 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		MaxConnectionAttempts:        conf.MaxConnectionAttempts,
 		MsgExpirationFactor:          conf.MsgExpirationFactor,
 		BootstrapPeers:               conf.BootstrapPeers,
+		EnableSpanningTree:           conf.EnableSpanningTree,
 	}
 	self := g.selfNetworkMember()
 	logger := util.GetLogger(util.DiscoveryLogger, self.InternalEndpoint)
@@ -158,12 +158,22 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 	g.certPuller = g.createCertStorePuller()
 	g.certStore = newCertStore(g.certPuller, g.idMapper, selfIdentity, mcs)
 
+	// Spanning tree is created after comm so we have a stable self PKI-ID.
+	g.spanningTree = newSpanningTreeState(g.comm.GetPKIid(), conf.EnableSpanningTree, conf.SpanningTreeMaxChildren)
+	if conf.EnableSpanningTree {
+		g.logger.Info("Spanning-tree block dissemination enabled")
+	}
+
 	if g.conf.ExternalEndpoint == "" {
 		g.logger.Warning("External endpoint is empty, peer will not be accessible outside of its organization")
 	}
 	// Adding delta for handlePresumedDead and
 	// acceptMessages goRoutines to block on Wait
 	g.stopSignal.Add(2)
+	if conf.EnableSpanningTree {
+		// spanningTreeBeaconLoop + spanningTreeRTTProbeLoop
+		g.stopSignal.Add(2)
+	}
 	go g.start()
 	go g.connect2BootstrapPeers()
 
@@ -296,6 +306,9 @@ func (g *Node) handlePresumedDead() {
 			return
 		case deadEndpoint := <-g.comm.PresumedDead():
 			g.presumedDead <- deadEndpoint
+			if g.spanningTree != nil && g.spanningTree.OnPeerDead(deadEndpoint) {
+				g.logger.Debugf("Spanning-tree parent %x presumed dead; waiting for new beacon", deadEndpoint)
+			}
 		}
 	}
 }
@@ -305,13 +318,27 @@ func (g *Node) syncDiscovery() {
 	defer g.logger.Debug("Exiting discovery sync loop")
 	for !g.toDie() {
 		g.disc.InitiateSync(g.conf.PullPeerNum)
-		time.Sleep(g.conf.PullInterval)
+		time.Sleep(g.effectivePullInterval())
 	}
+}
+
+// effectivePullInterval slows pull when the spanning tree is ready so repair
+// traffic stays in the background without competing with tree push.
+func (g *Node) effectivePullInterval() time.Duration {
+	if g.conf.EnableSpanningTree && g.spanningTree != nil && g.spanningTree.Ready() &&
+		g.conf.SpanningTreeStablePullInterval > 0 {
+		return g.conf.SpanningTreeStablePullInterval
+	}
+	return g.conf.PullInterval
 }
 
 func (g *Node) start() {
 	go g.syncDiscovery()
 	go g.handlePresumedDead()
+	if g.conf.EnableSpanningTree {
+		go g.spanningTreeBeaconLoop()
+		go g.spanningTreeRTTProbeLoop()
+	}
 
 	msgSelector := func(msg interface{}) bool {
 		gMsg, isGossipMsg := msg.(protoext.ReceivedMessage)
@@ -424,12 +451,12 @@ func (g *Node) handleMessage(m protoext.ReceivedMessage) {
 }
 
 func (g *Node) handleSpanningTreeMessage(m protoext.ReceivedMessage) {
-	if m == nil || m.GetGossipMessage() == nil {
+	if m == nil || m.GetGossipMessage() == nil || g.spanningTree == nil || !g.spanningTree.Enabled() {
 		return
 	}
 
 	msg := m.GetGossipMessage().GossipMessage
-	if msg == nil {
+	if msg == nil || msg.GetSpanningTree() == nil {
 		return
 	}
 
@@ -437,18 +464,221 @@ func (g *Node) handleSpanningTreeMessage(m protoext.ReceivedMessage) {
 	if m.GetConnectionInfo() != nil {
 		sender = append(sender, m.GetConnectionInfo().ID...)
 	}
+	st := msg.GetSpanningTree()
 
-	if g.spanningTree.handle(msg, sender) {
-		g.logger.Debugf("Updated spanning-tree parent to %x", sender)
-		if g.conf.PropagateIterations > 0 {
-			g.emitter.Add(&emittedGossipMessage{
-				SignedGossipMessage: m.GetGossipMessage(),
-				filter: func(id common.PKIidType) bool {
-					return !bytes.Equal(id, sender)
-				},
-			})
+	if isSpanningTreeAction(st) {
+		g.handleSpanningTreeAction(st, sender)
+		return
+	}
+
+	// Beacon: update parent candidacy and relay with incremented metrics.
+	ps := g.spanningTree.handleBeacon(msg, sender)
+	if ps.Changed {
+		cost, dist := g.spanningTree.bestPathCostSnapshot()
+		g.logger.Debugf("Spanning-tree parent candidate %x (cost=%d dist=%d)", ps.NewParent, cost, dist)
+		g.applyParentSwitch(ps)
+	}
+	g.relaySpanningTreeBeacon(msg, sender)
+}
+
+func (g *Node) handleSpanningTreeAction(st *pg.SpanningTreeMsg, sender []byte) {
+	self := g.comm.GetPKIid()
+	switch spanningTreeAction(st) {
+	case stDistanceAttach:
+		accepted := g.spanningTree.handleAttachRequest(sender)
+		action := stDistanceReject
+		if accepted {
+			action = stDistanceAccept
+			g.logger.Debugf("Accepted spanning-tree child %x", sender)
+		} else {
+			g.logger.Debugf("Rejected spanning-tree child %x (degree full or cycle)", sender)
+		}
+		resp := newSpanningTreeActionMsg(action, st.GetRootPkiId(), st.GetRootIncNum(), st.GetRootSeqNum(), self)
+		g.sendSpanningTreeControl(resp, sender)
+	case stDistanceDetach:
+		g.spanningTree.handleDetach(sender)
+		g.logger.Debugf("Child %x detached from spanning tree", sender)
+	case stDistanceAccept:
+		if g.spanningTree.handleAttachAccept(sender) {
+			g.logger.Debugf("Spanning-tree parent %x accepted attach", sender)
+		}
+	case stDistanceReject:
+		g.spanningTree.handleAttachReject(sender)
+		g.logger.Debugf("Spanning-tree parent %x rejected attach", sender)
+	}
+}
+
+func (g *Node) applyParentSwitch(ps parentSwitch) {
+	self := g.comm.GetPKIid()
+	if len(ps.OldParent) > 0 && !bytes.Equal(ps.OldParent, ps.NewParent) {
+		detach := newSpanningTreeActionMsg(stDistanceDetach, ps.Root, ps.RootInc, ps.RootSeq, self)
+		g.sendSpanningTreeControl(detach, ps.OldParent)
+	}
+	if len(ps.NewParent) > 0 {
+		attach := newSpanningTreeActionMsg(stDistanceAttach, ps.Root, ps.RootInc, ps.RootSeq, self)
+		g.sendSpanningTreeControl(attach, ps.NewParent)
+	}
+}
+
+func (g *Node) sendSpanningTreeControl(msg *pg.GossipMessage, destPKIID []byte) {
+	if len(destPKIID) == 0 {
+		return
+	}
+	peer := g.remotePeerByPKIID(destPKIID)
+	if peer == nil {
+		return
+	}
+	sMsg, err := protoext.NoopSign(msg)
+	if err != nil {
+		g.logger.Warningf("Failed signing spanning-tree control message: %v", err)
+		return
+	}
+	g.comm.Send(sMsg, peer)
+}
+
+func (g *Node) remotePeerByPKIID(pkiID []byte) *comm.RemotePeer {
+	for _, member := range g.disc.GetMembership() {
+		if bytes.Equal(member.PKIid, pkiID) {
+			return &comm.RemotePeer{PKIID: member.PKIid, Endpoint: member.PreferredEndpoint()}
 		}
 	}
+	return nil
+}
+
+func (g *Node) relaySpanningTreeBeacon(msg *pg.GossipMessage, sender []byte) {
+	st := msg.GetSpanningTree()
+	if st == nil || g.disc == nil {
+		return
+	}
+	self := g.comm.GetPKIid()
+	_, _, _, distance, cost := g.spanningTree.RootMetadata()
+	// Advertise our own distance/cost so downstream peers can attach to us.
+	if !g.spanningTree.Ready() && !g.spanningTree.IsRoot() {
+		// Still relay the received metrics (+1 hop) so the network discovers the root.
+		distance = st.GetDistance() + 1
+		cost = st.GetPathCost() + defaultLinkCost
+	}
+	relay := newSpanningTreeBeaconMsg(st.GetRootPkiId(), st.GetRootIncNum(), st.GetRootSeqNum(), distance, cost, self)
+	sMsg, err := protoext.NoopSign(relay)
+	if err != nil {
+		return
+	}
+	membership := g.orgMembers()
+	peers := filter.SelectPeers(g.conf.PropagatePeerNum, membership, func(member discovery.NetworkMember) bool {
+		return !bytes.Equal(member.PKIid, sender) && !bytes.Equal(member.PKIid, self)
+	})
+	if len(peers) > 0 {
+		g.comm.Send(sMsg, peers...)
+	}
+}
+
+func (g *Node) orgMembers() []discovery.NetworkMember {
+	var members []discovery.NetworkMember
+	for _, member := range g.disc.GetMembership() {
+		if g.IsInMyOrg(member) {
+			members = append(members, member)
+		}
+	}
+	return members
+}
+
+func (g *Node) spanningTreeBeaconLoop() {
+	defer g.stopSignal.Done()
+	interval := g.conf.SpanningTreeBeaconInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	incarnation := uint64(time.Now().UnixNano())
+	for {
+		select {
+		case <-g.toDieChan:
+			return
+		case <-ticker.C:
+			g.maybeEmitSpanningTreeBeacon(incarnation)
+		}
+	}
+}
+
+func (g *Node) maybeEmitSpanningTreeBeacon(incarnation uint64) {
+	if g.disc == nil || g.spanningTree == nil || !g.spanningTree.Enabled() {
+		return
+	}
+	self := g.comm.GetPKIid()
+	var memberIDs [][]byte
+	for _, m := range g.orgMembers() {
+		memberIDs = append(memberIDs, m.PKIid)
+	}
+	elected := pickRootPKIID(self, memberIDs)
+	if bytes.Equal(elected, self) {
+		g.spanningTree.BecomeRoot(incarnation)
+		root, inc, seq, ok := g.spanningTree.NextBeaconSeq()
+		if !ok {
+			return
+		}
+		msg := newSpanningTreeBeaconMsg(root, inc, seq, 0, 0, self)
+		sMsg, err := protoext.NoopSign(msg)
+		if err != nil {
+			return
+		}
+		peers := g.remotePeersFromMembership(g.orgMembers())
+		if len(peers) > 0 {
+			g.comm.Send(sMsg, peers...)
+		}
+		return
+	}
+	g.spanningTree.RelinquishRoot()
+}
+
+func (g *Node) spanningTreeRTTProbeLoop() {
+	defer g.stopSignal.Done()
+	interval := g.conf.SpanningTreeRTTProbeInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-g.toDieChan:
+			return
+		case <-ticker.C:
+			g.probeSpanningTreeLinkCosts()
+		}
+	}
+}
+
+func (g *Node) probeSpanningTreeLinkCosts() {
+	if g.disc == nil || g.spanningTree == nil || !g.spanningTree.Enabled() {
+		return
+	}
+	members := g.orgMembers()
+	// Probe up to a small subset each round to limit overhead.
+	limit := g.conf.PropagatePeerNum
+	if limit <= 0 {
+		limit = 3
+	}
+	if len(members) < limit {
+		limit = len(members)
+	}
+	for i := 0; i < limit; i++ {
+		member := members[i]
+		peer := &comm.RemotePeer{PKIID: member.PKIid, Endpoint: member.PreferredEndpoint()}
+		start := time.Now()
+		err := g.comm.Probe(peer)
+		if err != nil {
+			continue
+		}
+		g.spanningTree.SetLinkCost(member.PKIid, rttToLinkCost(time.Since(start)))
+	}
+}
+
+// bestPathCostSnapshot is a tiny helper for debug logs.
+func (s *spanningTreeState) bestPathCostSnapshot() (uint32, uint32) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.bestPathCost, s.bestDistance
 }
 
 func (g *Node) forwardDiscoveryMsg(msg protoext.ReceivedMessage) {
@@ -614,26 +844,14 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 
 	remainingMessages := make([]*emittedGossipMessage, 0, len(messages))
 	for _, msg := range messages {
-		if msg.routeViaSpanningTree && g.spanningTree != nil {
-			var peers2Send []*comm.RemotePeer
-			if len(msg.Channel) > 0 {
-				gc := g.chanState.getGossipChannelByChainID(msg.Channel)
-				if gc != nil {
-					membership := g.disc.GetMembership()
-					eligiblePeers := filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
-					peers2Send = g.spanningTree.selectPeers(eligiblePeers)
-				}
-			} else {
-				peers2Send = g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
-			}
-			if len(peers2Send) > 0 {
-				filteredPeers := g.removeSelfLoop(msg, peers2Send)
-				g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
+		if msg.routeViaSpanningTree && g.spanningTree != nil && g.spanningTree.Ready() {
+			if g.trySendDataViaSpanningTree(msg.SignedGossipMessage, msg.filter, msg.Channel, chanRoutingFactory) {
 				continue
 			}
-			// If the spanning tree has no eligible child peers for this message,
-			// do not fall back to the unrestricted channel fan-out.
-			continue
+			if !(g.spanningTree.IsRoot() && g.spanningTree.ChildCount() == 0) {
+				continue
+			}
+			// Root without children: fall through to classic channel fan-out.
 		}
 		remainingMessages = append(remainingMessages, msg)
 	}
@@ -674,6 +892,48 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 			g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
 		}
 	}
+}
+
+// sendDataViaSpanningTree pushes a block immediately to explicit tree children only.
+// Skips the batching emitter to cut per-hop latency.
+// Returns true if at least one child was contacted (or there was nothing to do as a leaf).
+func (g *Node) sendDataViaSpanningTree(msg *protoext.SignedGossipMessage, peerFilter func(common.PKIidType) bool, channel common.ChannelID, chanRoutingFactory channelRoutingFilterFactory) {
+	g.trySendDataViaSpanningTree(msg, peerFilter, channel, chanRoutingFactory)
+}
+
+// trySendDataViaSpanningTree returns true when the tree path handled the message
+// (sent to children, or this peer is a non-root leaf with no children).
+func (g *Node) trySendDataViaSpanningTree(msg *protoext.SignedGossipMessage, peerFilter func(common.PKIidType) bool, channel common.ChannelID, chanRoutingFactory channelRoutingFilterFactory) bool {
+	var peers2Send []*comm.RemotePeer
+	if len(channel) > 0 {
+		gc := g.chanState.getGossipChannelByChainID(channel)
+		if gc != nil {
+			membership := g.disc.GetMembership()
+			eligiblePeers := filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
+			peers2Send = g.spanningTree.selectPeers(eligiblePeers)
+		}
+	} else {
+		peers2Send = g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
+	}
+	if peerFilter == nil {
+		peerFilter = func(_ common.PKIidType) bool { return true }
+	}
+	var filtered []*comm.RemotePeer
+	for _, peer := range peers2Send {
+		if peerFilter(peer.PKIID) {
+			filtered = append(filtered, peer)
+		}
+	}
+	if len(filtered) > 0 {
+		g.comm.Send(msg, filtered...)
+		return true
+	}
+	// Non-root leaf: correctly has nothing to forward.
+	if !g.spanningTree.IsRoot() {
+		return true
+	}
+	// Root with zero children: caller may fall back to classic gossip.
+	return false
 }
 
 // removeSelfLoop deletes from the list of peers peer which has sent the message
@@ -736,7 +996,7 @@ func (g *Node) SendByCriteria(msg *protoext.SignedGossipMessage, criteria SendCr
 }
 
 func (g *Node) shouldRouteViaSpanningTree(msg *pg.GossipMessage) bool {
-	if g.spanningTree == nil || msg == nil || !protoext.IsDataMsg(msg) {
+	if !g.conf.EnableSpanningTree || g.spanningTree == nil || !g.spanningTree.Ready() || msg == nil || !protoext.IsDataMsg(msg) {
 		return false
 	}
 
@@ -784,12 +1044,27 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 	if g.conf.PropagateIterations == 0 {
 		return
 	}
+
+	// Fast path: immediate tree fan-out for blocks when the tree is ready.
+	if g.shouldRouteViaSpanningTree(msg) {
+		if g.trySendDataViaSpanningTree(sMsg, func(_ common.PKIidType) bool { return true }, msg.Channel, func(gc channel.GossipChannel) filter.RoutingFilter {
+			return filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, g.IsInMyOrg)
+		}) {
+			return
+		}
+		// Root with no attached children yet: fall back to classic push so
+		// blocks are not stalled while the tree is still forming.
+		if !(g.spanningTree.IsRoot() && g.spanningTree.ChildCount() == 0) {
+			return
+		}
+	}
+
 	g.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage: sMsg,
 		filter: func(_ common.PKIidType) bool {
 			return true
 		},
-		routeViaSpanningTree: g.shouldRouteViaSpanningTree(msg),
+		routeViaSpanningTree: false,
 	})
 }
 

@@ -85,7 +85,8 @@ type DiscoveryConfig struct {
 	MaxConnectionAttempts        int
 	MsgExpirationFactor          int
 	BootstrapPeers               []string
-	// NN: EnableSpanningTree indicates whether the discovery service should use a spanning tree for message dissemination
+	// EnableSpanningTree is retained for callers that propagate gossip STP config into discovery.
+	// Discovery itself does not build the tree; block fan-out is handled in the gossip layer.
 	EnableSpanningTree bool
 }
 

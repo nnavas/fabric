@@ -22,55 +22,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
-	state := newSpanningTreeState()
+func TestSpanningTreeAdoptsBestParentViaBeacon(t *testing.T) {
+	self := []byte("self")
+	state := newSpanningTreeState(self, true, 8)
 
-	first := &pg.GossipMessage{
-		Content: &pg.GossipMessage_SpanningTree{
-			SpanningTree: &pg.SpanningTreeMsg{
-				RootPkiId:   []byte("root"),
-				RootIncNum:  1,
-				RootSeqNum:  1,
-				Distance:    1,
-				SenderPkiId: []byte("peer-a"),
-				PathCost:    10,
-			},
-		},
-	}
+	first := newSpanningTreeBeaconMsg([]byte("root"), 1, 1, 1, 10, []byte("peer-a"))
+	ps := state.handleBeacon(first, []byte("peer-a"))
+	require.True(t, ps.Changed)
+	require.Equal(t, []byte("peer-a"), ps.NewParent)
+	require.Nil(t, state.Parent()) // pending until accept
 
-	require.True(t, state.handle(first, []byte("peer-a")))
-	require.Equal(t, []byte("peer-a"), state.parent)
-	require.Equal(t, uint32(10), state.bestPathCost)
+	require.True(t, state.handleAttachAccept([]byte("peer-a")))
+	require.Equal(t, []byte("peer-a"), state.Parent())
+	require.True(t, state.Ready())
 
-	better := &pg.GossipMessage{
-		Content: &pg.GossipMessage_SpanningTree{
-			SpanningTree: &pg.SpanningTreeMsg{
-				RootPkiId:   []byte("root"),
-				RootIncNum:  1,
-				RootSeqNum:  1,
-				Distance:    0,
-				SenderPkiId: []byte("peer-b"),
-				PathCost:    1,
-			},
-		},
-	}
-
-	require.True(t, state.handle(better, []byte("peer-b")))
-	require.Equal(t, []byte("peer-b"), state.parent)
-	require.Equal(t, uint32(1), state.bestPathCost)
+	better := newSpanningTreeBeaconMsg([]byte("root"), 1, 2, 0, 1, []byte("peer-b"))
+	ps = state.handleBeacon(better, []byte("peer-b"))
+	require.True(t, ps.Changed)
+	require.Equal(t, []byte("peer-a"), ps.OldParent)
+	require.Equal(t, []byte("peer-b"), ps.NewParent)
 }
 
-func TestSpanningTreeStateSelectsChildPeersForData(t *testing.T) {
-	state := newSpanningTreeState()
-	state.children["peer-a"] = struct{}{}
-	state.children["peer-b"] = struct{}{}
+func TestSpanningTreeExplicitChildrenAndDegreeBound(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 1)
+
+	require.True(t, state.handleAttachRequest([]byte("child-a")))
+	require.False(t, state.handleAttachRequest([]byte("child-b")), "degree bound should reject second child")
+	require.Equal(t, 1, state.ChildCount())
+
+	state.handleDetach([]byte("child-a"))
+	require.Equal(t, 0, state.ChildCount())
+	require.True(t, state.handleAttachRequest([]byte("child-b")))
+}
+
+func TestSpanningTreeSelectsOnlyExplicitChildren(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 8)
+	require.True(t, state.handleAttachRequest([]byte("peer-a")))
+	require.True(t, state.handleAttachRequest([]byte("peer-b")))
+
+	// Beacons from other peers must NOT create children.
+	state.handleBeacon(newSpanningTreeBeaconMsg([]byte("root"), 1, 1, 2, 50, []byte("peer-c")), []byte("peer-c"))
 
 	peers := []*comm.RemotePeer{
 		{PKIID: []byte("peer-a")},
 		{PKIID: []byte("peer-c")},
 		{PKIID: []byte("peer-b")},
 	}
-
 	selected := state.selectPeers(peers)
 	require.Len(t, selected, 2)
 	var selectedPKIIDs [][]byte
@@ -80,14 +77,48 @@ func TestSpanningTreeStateSelectsChildPeersForData(t *testing.T) {
 	require.ElementsMatch(t, [][]byte{[]byte("peer-a"), []byte("peer-b")}, selectedPKIIDs)
 }
 
+func TestSpanningTreeReadyRequiresRootOrAcceptedParent(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 8)
+	require.False(t, state.Ready())
+
+	state.BecomeRoot(1)
+	require.True(t, state.IsRoot())
+	require.True(t, state.Ready())
+
+	state.RelinquishRoot()
+	require.False(t, state.Ready())
+
+	state.handleBeacon(newSpanningTreeBeaconMsg([]byte("root"), 1, 1, 0, 0, []byte("parent")), []byte("parent"))
+	require.False(t, state.Ready(), "pending attach is not ready")
+	state.handleAttachAccept([]byte("parent"))
+	require.True(t, state.Ready())
+}
+
+func TestSpanningTreeOnPeerDeadClearsParent(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 8)
+	state.handleBeacon(newSpanningTreeBeaconMsg([]byte("root"), 1, 1, 0, 0, []byte("parent")), []byte("parent"))
+	state.handleAttachAccept([]byte("parent"))
+	require.True(t, state.OnPeerDead([]byte("parent")))
+	require.False(t, state.Ready())
+}
+
+func TestPickRootPKIID(t *testing.T) {
+	self := []byte("m")
+	require.Equal(t, []byte("a"), pickRootPKIID(self, [][]byte{[]byte("z"), []byte("a")}))
+	require.Equal(t, self, pickRootPKIID(self, nil))
+}
+
 func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testing.T) {
+	tree := newSpanningTreeState([]byte("self"), true, 8)
+	tree.BecomeRoot(1)
+	require.True(t, tree.handleAttachRequest([]byte("peer-a")))
+	require.True(t, tree.handleAttachRequest([]byte("peer-b")))
+
 	node := &Node{
-		spanningTree: newSpanningTreeState(),
-		conf:         &Config{PropagateIterations: 1},
+		spanningTree: tree,
+		conf:         &Config{PropagateIterations: 1, EnableSpanningTree: true},
 		logger:       util.GetLogger(util.GossipLogger, "test"),
 	}
-	node.spanningTree.children[string([]byte("peer-a"))] = struct{}{}
-	node.spanningTree.children[string([]byte("peer-b"))] = struct{}{}
 
 	msg := &emittedGossipMessage{
 		SignedGossipMessage: &protoext.SignedGossipMessage{
@@ -125,6 +156,28 @@ func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testi
 		sentPKIIDs = append(sentPKIIDs, peer.PKIID)
 	}
 	require.ElementsMatch(t, [][]byte{[]byte("peer-a"), []byte("peer-b")}, sentPKIIDs)
+}
+
+func TestShouldRouteViaSpanningTreeRequiresReadiness(t *testing.T) {
+	tree := newSpanningTreeState([]byte("self"), true, 8)
+	node := &Node{
+		spanningTree: tree,
+		conf:         &Config{EnableSpanningTree: true},
+	}
+	msg := &pg.GossipMessage{
+		Channel: []byte("A"),
+		Content: &pg.GossipMessage_DataMsg{
+			DataMsg: &pg.DataMessage{Payload: &pg.Payload{SeqNum: 1}},
+		},
+	}
+	require.False(t, node.shouldRouteViaSpanningTree(msg))
+	tree.BecomeRoot(1)
+	require.True(t, node.shouldRouteViaSpanningTree(msg))
+}
+
+func TestRTTToLinkCost(t *testing.T) {
+	require.Equal(t, uint32(1), rttToLinkCost(0))
+	require.Equal(t, uint32(5), rttToLinkCost(5*time.Millisecond))
 }
 
 type mockComm struct {

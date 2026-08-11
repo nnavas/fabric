@@ -138,6 +138,17 @@ peer:
     propagateIterations: 1
     # Number of peers selected to push messages to
     propagatePeerNum: 3
+    # Enable spanning-tree block dissemination (push only to tree children).
+    # When ready, reduces duplicate block traffic vs random propagatePeerNum fan-out.
+    enableSpanningTree: true
+    # How often the elected root announces spanning-tree beacons
+    spanningTreeBeaconInterval: 2s
+    # Max children per peer (degree bound) for a balanced tree
+    spanningTreeMaxChildren: 8
+    # Slower pull interval used once the spanning tree is ready (gap repair only)
+    spanningTreeStablePullInterval: 15s
+    # How often to refresh RTT-based link costs used in parent selection
+    spanningTreeRTTProbeInterval: 10s
     # Determines frequency of pull phases(unit: second)
     # Must be greater than digestWaitTime + responseWaitTime
     pullInterval: 4s

@@ -191,6 +191,7 @@ func (c custodianLauncherAdapter) Stop(ccid string) error {
 
 func serve(args []string) error {
 	logger.Infof("Starting %s", version.GetInfo())
+	logger.Infof("NN: STP with balanced tree peer")
 
 	// Info logging for peer config, includes core.yaml settings and environment variable overrides
 	allSettings := viper.AllSettings()

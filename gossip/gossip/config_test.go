@@ -96,6 +96,11 @@ func TestGlobalConfig(t *testing.T) {
 		ReconnectInterval:            22 * time.Second,
 		MaxConnectionAttempts:        100,
 		MsgExpirationFactor:          10,
+		EnableSpanningTree:           true,
+		SpanningTreeBeaconInterval:   2 * time.Second,
+		SpanningTreeMaxChildren:      8,
+		SpanningTreeStablePullInterval: 15 * time.Second,
+		SpanningTreeRTTProbeInterval: 10 * time.Second,
 	}
 
 	require.Equal(t, expectedConfig, coreConfig)
@@ -150,6 +155,11 @@ func TestGlobalConfigDefaults(t *testing.T) {
 		ReconnectInterval:            5 * discovery.DefAliveTimeInterval,
 		MaxConnectionAttempts:        120,
 		MsgExpirationFactor:          20,
+		EnableSpanningTree:           true,
+		SpanningTreeBeaconInterval:   2 * time.Second,
+		SpanningTreeMaxChildren:      8,
+		SpanningTreeStablePullInterval: 15 * time.Second,
+		SpanningTreeRTTProbeInterval: 10 * time.Second,
 	}
 
 	require.Equal(t, expectedConfig, coreConfig)

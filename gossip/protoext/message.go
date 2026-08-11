@@ -129,6 +129,16 @@ func IsSpanningTreeMsg(m *gossip.GossipMessage) bool {
 	return m.GetSpanningTree() != nil
 }
 
+// IsSpanningTreeBeacon returns true for tree metric advertisements (not join/leave actions).
+func IsSpanningTreeBeacon(m *gossip.GossipMessage) bool {
+	st := m.GetSpanningTree()
+	if st == nil {
+		return false
+	}
+	// Action messages reuse PathCost == MaxUint32 as a sentinel.
+	return st.GetPathCost() != ^uint32(0)
+}
+
 // IsTagLegal checks the GossipMessage tags and inner type
 // and returns an error if the tag doesn't match the type.
 func IsTagLegal(m *gossip.GossipMessage) error {

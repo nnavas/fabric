@@ -37,6 +37,11 @@ peer:
     maxPropagationBurstSize: 10
     propagateIterations: 1
     propagatePeerNum: 3
+    enableSpanningTree: true
+    spanningTreeBeaconInterval: 2s
+    spanningTreeMaxChildren: 8
+    spanningTreeStablePullInterval: 15s
+    spanningTreeRTTProbeInterval: 10s
     pullInterval: 4s
     pullPeerNum: 3
     requestStateInfoInterval: 4s

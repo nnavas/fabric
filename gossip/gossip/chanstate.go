@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/comm"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/discovery"
+	"github.com/hyperledger/fabric/gossip/filter"
 	"github.com/hyperledger/fabric/gossip/gossip/channel"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
@@ -162,17 +163,35 @@ func (ga *gossipAdapterImpl) Gossip(msg *protoext.SignedGossipMessage) {
 	})
 }
 
-// Forward sends message to the next hops
+// Forward sends message to the next hops.
+// When the spanning tree is ready, data messages are pushed immediately to children
+// (bypassing the batching emitter) to reduce dissemination latency.
 func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
 	gossipMsg := msg.GetGossipMessage()
 	if gossipMsg == nil || gossipMsg.GossipMessage == nil {
 		return
 	}
 
+	if ga.Node.conf.PropagateIterations == 0 {
+		return
+	}
+
+	peerFilter := msg.GetConnectionInfo().ID.IsNotSameFilter
+	if ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage) {
+		if ga.Node.trySendDataViaSpanningTree(gossipMsg, peerFilter, gossipMsg.Channel, func(gc channel.GossipChannel) filter.RoutingFilter {
+			return filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, ga.Node.IsInMyOrg)
+		}) {
+			return
+		}
+		if !(ga.Node.spanningTree.IsRoot() && ga.Node.spanningTree.ChildCount() == 0) {
+			return
+		}
+	}
+
 	ga.Node.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage:  gossipMsg,
-		filter:               msg.GetConnectionInfo().ID.IsNotSameFilter,
-		routeViaSpanningTree: ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage),
+		filter:               peerFilter,
+		routeViaSpanningTree: false,
 	})
 }
 

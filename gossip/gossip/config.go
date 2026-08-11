@@ -97,6 +97,18 @@ type Config struct {
 	MsgExpirationFactor int
 	// MaxConnectionAttempts is the max number of attempts to connect to a peer (wait for alive ack)
 	MaxConnectionAttempts int
+
+	// EnableSpanningTree enables spanning-tree based block dissemination instead of random push.
+	EnableSpanningTree bool
+	// SpanningTreeBeaconInterval is how often the root announces tree beacons.
+	SpanningTreeBeaconInterval time.Duration
+	// SpanningTreeMaxChildren bounds fan-out degree per peer (balanced tree).
+	SpanningTreeMaxChildren int
+	// SpanningTreeStablePullInterval is used for membership/block pull when the tree is ready,
+	// reducing background repair chatter while still covering gaps.
+	SpanningTreeStablePullInterval time.Duration
+	// SpanningTreeRTTProbeInterval controls how often link costs are refreshed via Probe.
+	SpanningTreeRTTProbeInterval time.Duration
 }
 
 // GlobalConfig builds a Config from the given endpoint, certificate and bootstrap peers.
@@ -148,6 +160,16 @@ func (c *Config) loadConfig(endpoint string, certs *common.TLSCertificates, boot
 	c.ReconnectInterval = util.GetDurationOrDefault("peer.gossip.reconnectInterval", c.AliveExpirationTimeout)
 	c.MaxConnectionAttempts = util.GetIntOrDefault("peer.gossip.maxConnectionAttempts", discovery.DefMaxConnectionAttempts)
 	c.MsgExpirationFactor = util.GetIntOrDefault("peer.gossip.msgExpirationFactor", discovery.DefMsgExpirationFactor)
+
+	// Spanning-tree dissemination (custom STP path).
+	c.EnableSpanningTree = true
+	if viper.IsSet("peer.gossip.enableSpanningTree") {
+		c.EnableSpanningTree = viper.GetBool("peer.gossip.enableSpanningTree")
+	}
+	c.SpanningTreeBeaconInterval = util.GetDurationOrDefault("peer.gossip.spanningTreeBeaconInterval", 2*time.Second)
+	c.SpanningTreeMaxChildren = util.GetIntOrDefault("peer.gossip.spanningTreeMaxChildren", 8)
+	c.SpanningTreeStablePullInterval = util.GetDurationOrDefault("peer.gossip.spanningTreeStablePullInterval", 15*time.Second)
+	c.SpanningTreeRTTProbeInterval = util.GetDurationOrDefault("peer.gossip.spanningTreeRTTProbeInterval", 10*time.Second)
 
 	return nil
 }

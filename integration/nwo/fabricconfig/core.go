@@ -76,8 +76,13 @@ type Gossip struct {
 	MaxPropagationBurstLatency time.Duration   `yaml:"maxPropagationBurstLatency,omitempty"`
 	MaxPropagationBurstSize    int             `yaml:"maxPropagationBurstSize,omitempty"`
 	PropagateIterations        int             `yaml:"propagateIterations,omitempty"`
-	PropagatePeerNum           int             `yaml:"propagatePeerNum,omitempty"`
-	PullInterval               time.Duration   `yaml:"pullInterval,omitempty"`
+    PropagatePeerNum           int             `yaml:"propagatePeerNum,omitempty"`
+    EnableSpanningTree         *bool           `yaml:"enableSpanningTree,omitempty"`
+    SpanningTreeBeaconInterval time.Duration   `yaml:"spanningTreeBeaconInterval,omitempty"`
+    SpanningTreeMaxChildren    int             `yaml:"spanningTreeMaxChildren,omitempty"`
+    SpanningTreeStablePullInterval time.Duration `yaml:"spanningTreeStablePullInterval,omitempty"`
+    SpanningTreeRTTProbeInterval time.Duration `yaml:"spanningTreeRTTProbeInterval,omitempty"`
+    PullInterval               time.Duration   `yaml:"pullInterval,omitempty"`
 	PullPeerNum                int             `yaml:"pullPeerNum,omitempty"`
 	RequestStateInfoInterval   time.Duration   `yaml:"requestStateInfoInterval,omitempty"`
 	PublishStateInfoInterval   time.Duration   `yaml:"publishStateInfoInterval,omitempty"`
