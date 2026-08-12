@@ -23,9 +23,10 @@ import (
 )
 
 func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
-	state := newSpanningTreeState()
+	state := newSpanningTreeState([]byte("self"), true, 8, 16)
 
 	first := &pg.GossipMessage{
+		Channel: []byte("A"),
 		Content: &pg.GossipMessage_SpanningTree{
 			SpanningTree: &pg.SpanningTreeMsg{
 				RootPkiId:   []byte("root"),
@@ -38,11 +39,18 @@ func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
 		},
 	}
 
-	require.True(t, state.handle(first, []byte("peer-a")))
-	require.Equal(t, []byte("peer-a"), state.parent)
-	require.Equal(t, uint32(10), state.bestPathCost)
+	adopted, forward := state.handle("A", first, []byte("peer-a"))
+	require.True(t, adopted)
+	require.NotNil(t, forward)
+	require.Equal(t, []byte("peer-a"), state.parentOf("A"))
+	// Received PathCost 10 + default edge cost 1, Distance incremented by 1.
+	require.Equal(t, uint32(11), state.bestPathCostOf("A"))
+	require.Equal(t, uint32(2), state.bestDistanceOf("A"))
+	require.Equal(t, uint32(2), forward.GetSpanningTree().GetDistance())
+	require.Equal(t, uint32(11), forward.GetSpanningTree().GetPathCost())
 
 	better := &pg.GossipMessage{
+		Channel: []byte("A"),
 		Content: &pg.GossipMessage_SpanningTree{
 			SpanningTree: &pg.SpanningTreeMsg{
 				RootPkiId:   []byte("root"),
@@ -55,15 +63,20 @@ func TestSpanningTreeStateAdoptsBestParent(t *testing.T) {
 		},
 	}
 
-	require.True(t, state.handle(better, []byte("peer-b")))
-	require.Equal(t, []byte("peer-b"), state.parent)
-	require.Equal(t, uint32(1), state.bestPathCost)
+	adopted, forward = state.handle("A", better, []byte("peer-b"))
+	require.True(t, adopted)
+	require.NotNil(t, forward)
+	require.Equal(t, []byte("peer-b"), state.parentOf("A"))
+	require.Equal(t, uint32(2), state.bestPathCostOf("A"))
+	require.Equal(t, uint32(1), state.bestDistanceOf("A"))
 }
 
 func TestSpanningTreeStateSelectsChildPeersForData(t *testing.T) {
-	state := newSpanningTreeState()
-	state.children["peer-a"] = struct{}{}
-	state.children["peer-b"] = struct{}{}
+	state := newSpanningTreeState([]byte("self"), true, 8, 16)
+	state.addChildForTest("A", []byte("peer-a"))
+	state.addChildForTest("A", []byte("peer-b"))
+	state.RecordEdgeCost([]byte("peer-b"), 1)
+	state.RecordEdgeCost([]byte("peer-a"), 5)
 
 	peers := []*comm.RemotePeer{
 		{PKIID: []byte("peer-a")},
@@ -71,23 +84,45 @@ func TestSpanningTreeStateSelectsChildPeersForData(t *testing.T) {
 		{PKIID: []byte("peer-b")},
 	}
 
-	selected := state.selectPeers(peers)
+	selected := state.selectPeers("A", peers)
 	require.Len(t, selected, 2)
-	var selectedPKIIDs [][]byte
-	for _, peer := range selected {
-		selectedPKIIDs = append(selectedPKIIDs, peer.PKIID)
+	// Lower edge-cost child should be preferred first.
+	require.Equal(t, common.PKIidType("peer-b"), selected[0].PKIID)
+	require.Equal(t, common.PKIidType("peer-a"), selected[1].PKIID)
+}
+
+func TestSpanningTreeFanoutCap(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 1, 16)
+	state.addChildForTest("A", []byte("peer-a"))
+	state.addChildForTest("A", []byte("peer-b"))
+
+	peers := []*comm.RemotePeer{
+		{PKIID: []byte("peer-a")},
+		{PKIID: []byte("peer-b")},
 	}
-	require.ElementsMatch(t, [][]byte{[]byte("peer-a"), []byte("peer-b")}, selectedPKIIDs)
+	selected := state.selectPeers("A", peers)
+	require.Len(t, selected, 1)
+}
+
+func TestSpanningTreeRootAdvertisementIncrementsSeq(t *testing.T) {
+	state := newSpanningTreeState([]byte("self"), true, 8, 16)
+	state.SetRoot("A", true)
+	first := state.BuildRootAdvertisement("A")
+	require.NotNil(t, first)
+	require.Equal(t, uint32(0), first.GetSpanningTree().GetDistance())
+	require.Equal(t, []byte("self"), first.GetSpanningTree().GetRootPkiId())
+	second := state.BuildRootAdvertisement("A")
+	require.Greater(t, second.GetSpanningTree().GetRootSeqNum(), first.GetSpanningTree().GetRootSeqNum())
 }
 
 func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testing.T) {
 	node := &Node{
-		spanningTree: newSpanningTreeState(),
-		conf:         &Config{PropagateIterations: 1},
+		spanningTree: newSpanningTreeState([]byte("self"), true, 8, 16),
+		conf:         &Config{PropagateIterations: 1, PropagatePeerNum: 3},
 		logger:       util.GetLogger(util.GossipLogger, "test"),
 	}
-	node.spanningTree.children[string([]byte("peer-a"))] = struct{}{}
-	node.spanningTree.children[string([]byte("peer-b"))] = struct{}{}
+	node.spanningTree.addChildForTest("A", []byte("peer-a"))
+	node.spanningTree.addChildForTest("A", []byte("peer-b"))
 
 	msg := &emittedGossipMessage{
 		SignedGossipMessage: &protoext.SignedGossipMessage{
@@ -125,6 +160,47 @@ func TestGossipInChanSendsMarkedBlockMessagesOnlyToSpanningTreeChildren(t *testi
 		sentPKIIDs = append(sentPKIIDs, peer.PKIID)
 	}
 	require.ElementsMatch(t, [][]byte{[]byte("peer-a"), []byte("peer-b")}, sentPKIIDs)
+}
+
+func TestGossipInChanFallsBackWhenSpanningTreeHasNoChildren(t *testing.T) {
+	node := &Node{
+		spanningTree: newSpanningTreeState([]byte("self"), true, 8, 16),
+		conf:         &Config{PropagateIterations: 1, PropagatePeerNum: 2},
+		logger:       util.GetLogger(util.GossipLogger, "test"),
+	}
+
+	msg := &emittedGossipMessage{
+		SignedGossipMessage: &protoext.SignedGossipMessage{
+			GossipMessage: &pg.GossipMessage{
+				Channel: []byte("A"),
+				Tag:     pg.GossipMessage_CHAN_AND_ORG,
+				Content: &pg.GossipMessage_DataMsg{
+					DataMsg: &pg.DataMessage{Payload: &pg.Payload{SeqNum: 1}},
+				},
+			},
+		},
+		filter:               func(_ common.PKIidType) bool { return true },
+		routeViaSpanningTree: true,
+	}
+
+	var sentTo []*comm.RemotePeer
+	node.comm = &mockComm{sendFn: func(_ *protoext.SignedGossipMessage, peers ...*comm.RemotePeer) {
+		sentTo = append(sentTo, peers...)
+	}}
+	node.chanState = &channelState{channels: map[string]channel.GossipChannel{
+		"A": &mockGossipChannel{},
+	}}
+	node.disc = &mockDiscovery{members: []discovery.NetworkMember{
+		{PKIid: []byte("peer-a")},
+		{PKIid: []byte("peer-b")},
+		{PKIid: []byte("peer-c")},
+	}}
+
+	node.gossipInChan([]*emittedGossipMessage{msg}, func(gc channel.GossipChannel) filter.RoutingFilter {
+		return func(member discovery.NetworkMember) bool { return true }
+	})
+
+	require.Len(t, sentTo, 2)
 }
 
 type mockComm struct {

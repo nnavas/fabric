@@ -37,6 +37,10 @@ peer:
     maxPropagationBurstSize: 10
     propagateIterations: 1
     propagatePeerNum: 3
+    enableSpanningTree: false
+    spanningTreePropagateInterval: 5s
+    maxSpanningTreeFanout: 8
+    maxSpanningTreeDistance: 16
     pullInterval: 4s
     pullPeerNum: 3
     requestStateInfoInterval: 4s

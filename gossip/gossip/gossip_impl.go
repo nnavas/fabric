@@ -95,7 +95,12 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		gossipMetrics:         gossipMetrics,
 	}
 	g.stateInfoMsgStore = g.newStateInfoMsgStore()
-	g.spanningTree = newSpanningTreeState()
+	g.spanningTree = newSpanningTreeState(
+		nil, // filled after comm is created
+		conf.EnableSpanningTree,
+		conf.MaxSpanningTreeFanout,
+		uint32(conf.MaxSpanningTreeDistance),
+	)
 
 	g.idMapper = identity.NewIdentityMapper(mcs, selfIdentity, func(pkiID common.PKIidType, identity api.PeerIdentityType) {
 		// Identities which are purged from the membership store
@@ -131,6 +136,7 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		lgr.Error("Failed instantiating communication layer:", err)
 		return nil
 	}
+	g.spanningTree.selfPKIID = append([]byte(nil), g.comm.GetPKIid()...)
 
 	g.chanState = newChannelState(g)
 	g.emitter = newBatchingEmitter(conf.PropagateIterations,
@@ -148,6 +154,7 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		MaxConnectionAttempts:        conf.MaxConnectionAttempts,
 		MsgExpirationFactor:          conf.MsgExpirationFactor,
 		BootstrapPeers:               conf.BootstrapPeers,
+		EnableSpanningTree:           conf.EnableSpanningTree,
 	}
 	self := g.selfNetworkMember()
 	logger := util.GetLogger(util.DiscoveryLogger, self.InternalEndpoint)
@@ -166,6 +173,10 @@ func New(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 	g.stopSignal.Add(2)
 	go g.start()
 	go g.connect2BootstrapPeers()
+	if g.spanningTree.Enabled() {
+		g.stopSignal.Add(1)
+		go g.spanningTreeRootAdvertiser()
+	}
 
 	return g
 }
@@ -424,11 +435,12 @@ func (g *Node) handleMessage(m protoext.ReceivedMessage) {
 }
 
 func (g *Node) handleSpanningTreeMessage(m protoext.ReceivedMessage) {
-	if m == nil || m.GetGossipMessage() == nil {
+	if m == nil || m.GetGossipMessage() == nil || !g.spanningTree.Enabled() {
 		return
 	}
 
-	msg := m.GetGossipMessage().GossipMessage
+	signed := m.GetGossipMessage()
+	msg := signed.GossipMessage
 	if msg == nil {
 		return
 	}
@@ -438,16 +450,118 @@ func (g *Node) handleSpanningTreeMessage(m protoext.ReceivedMessage) {
 		sender = append(sender, m.GetConnectionInfo().ID...)
 	}
 
-	if g.spanningTree.handle(msg, sender) {
-		g.logger.Debugf("Updated spanning-tree parent to %x", sender)
-		if g.conf.PropagateIterations > 0 {
-			g.emitter.Add(&emittedGossipMessage{
-				SignedGossipMessage: m.GetGossipMessage(),
-				filter: func(id common.PKIidType) bool {
-					return !bytes.Equal(id, sender)
-				},
-			})
+	channel := string(msg.Channel)
+	adopted, forwardMsg := g.spanningTree.handle(channel, msg, sender)
+	if adopted {
+		g.logger.Debugf("Updated spanning-tree parent for channel %s to %x", channel, sender)
+	}
+	if forwardMsg == nil || g.conf.PropagateIterations == 0 {
+		return
+	}
+	g.propagateSpanningTreeMsg(forwardMsg, sender)
+}
+
+// SetSpanningTreeRoot marks this peer as the spanning-tree root for the channel when enabled.
+// Channel leaders that pull blocks from the orderer should be roots so block DataMsgs
+// disseminate along the tree.
+func (g *Node) SetSpanningTreeRoot(channelID common.ChannelID, isRoot bool) {
+	if !g.spanningTree.Enabled() {
+		return
+	}
+	channel := string(channelID)
+	g.spanningTree.SetRoot(channel, isRoot)
+	g.logger.Infof("Spanning-tree root for channel %s set to %v", channel, isRoot)
+	if isRoot {
+		if adv := g.spanningTree.BuildRootAdvertisement(channel); adv != nil {
+			g.propagateSpanningTreeMsg(adv, nil)
 		}
+	}
+}
+
+func (g *Node) propagateSpanningTreeMsg(msg *pg.GossipMessage, exclude []byte) {
+	if msg == nil || g.conf.PropagateIterations == 0 {
+		return
+	}
+	sMsg := &protoext.SignedGossipMessage{GossipMessage: msg}
+	_, err := sMsg.Sign(func(payload []byte) ([]byte, error) {
+		return g.mcs.Sign(payload)
+	})
+	if err != nil {
+		g.logger.Warningf("Failed signing spanning-tree message: %+v", errors.WithStack(err))
+		return
+	}
+
+	membership := g.disc.GetMembership()
+	gc := g.chanState.getGossipChannelByChainID(msg.Channel)
+	selector := g.IsInMyOrg
+	if gc != nil {
+		selector = filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, g.IsInMyOrg)
+	}
+	peers2Send := filter.SelectPeers(g.conf.PropagatePeerNum, membership, selector)
+	filtered := make([]*comm.RemotePeer, 0, len(peers2Send))
+	for _, peer := range peers2Send {
+		if len(exclude) > 0 && bytes.Equal(peer.PKIID, exclude) {
+			continue
+		}
+		filtered = append(filtered, peer)
+	}
+	if len(filtered) > 0 {
+		g.comm.Send(sMsg, filtered...)
+	}
+}
+
+func (g *Node) spanningTreeRootAdvertiser() {
+	defer g.stopSignal.Done()
+	interval := g.conf.SpanningTreePropagateInterval
+	if interval <= 0 {
+		interval = defSpanningTreePropagateInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.toDieChan:
+			return
+		case <-ticker.C:
+			g.refreshSpanningTreeEdgeCosts()
+			alive := make(map[string]struct{})
+			for _, member := range g.disc.GetMembership() {
+				alive[string(member.PKIid)] = struct{}{}
+			}
+			for _, channel := range g.spanningTree.RootChannels() {
+				g.spanningTree.Prune(channel, alive)
+				if adv := g.spanningTree.BuildRootAdvertisement(channel); adv != nil {
+					g.propagateSpanningTreeMsg(adv, nil)
+				}
+			}
+			for _, channel := range g.spanningTree.channelsWithParent() {
+				g.spanningTree.Prune(channel, alive)
+				if adv := g.spanningTree.BuildParentAdvertisement(channel); adv != nil {
+					g.propagateSpanningTreeMsg(adv, g.spanningTree.parentOf(channel))
+				}
+			}
+		}
+	}
+}
+
+// refreshSpanningTreeEdgeCosts probes a sample of alive peers and stores RTT as PathCost edge weights.
+func (g *Node) refreshSpanningTreeEdgeCosts() {
+	membership := g.disc.GetMembership()
+	if len(membership) == 0 {
+		return
+	}
+	sample := filter.SelectPeers(g.conf.PropagatePeerNum, membership, func(discovery.NetworkMember) bool { return true })
+	for _, peer := range sample {
+		start := time.Now()
+		if err := g.comm.Probe(peer); err != nil {
+			continue
+		}
+		cost := uint32(time.Since(start).Milliseconds())
+		if cost == 0 {
+			cost = defSpanningTreeEdgeCost
+		}
+		g.spanningTree.RecordEdgeCost(peer.PKIID, cost)
 	}
 }
 
@@ -614,26 +728,17 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 
 	remainingMessages := make([]*emittedGossipMessage, 0, len(messages))
 	for _, msg := range messages {
-		if msg.routeViaSpanningTree && g.spanningTree != nil {
-			var peers2Send []*comm.RemotePeer
+		if msg.routeViaSpanningTree && g.spanningTree.Enabled() {
+			var routing filter.RoutingFilter
 			if len(msg.Channel) > 0 {
-				gc := g.chanState.getGossipChannelByChainID(msg.Channel)
-				if gc != nil {
-					membership := g.disc.GetMembership()
-					eligiblePeers := filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
-					peers2Send = g.spanningTree.selectPeers(eligiblePeers)
+				if gc := g.chanState.getGossipChannelByChainID(msg.Channel); gc != nil {
+					routing = chanRoutingFactory(gc)
 				}
-			} else {
-				peers2Send = g.spanningTree.selectPeers(g.remotePeersFromMembership(g.disc.GetMembership()))
 			}
-			if len(peers2Send) > 0 {
-				filteredPeers := g.removeSelfLoop(msg, peers2Send)
-				g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
+			if g.sendDataMsgViaSpanningTree(msg.SignedGossipMessage, msg.filter, true, routing) {
 				continue
 			}
-			// If the spanning tree has no eligible child peers for this message,
-			// do not fall back to the unrestricted channel fan-out.
-			continue
+			// Tree is incomplete; fall through to classic channel fan-out.
 		}
 		remainingMessages = append(remainingMessages, msg)
 	}
@@ -674,6 +779,63 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 			g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
 		}
 	}
+}
+
+// sendDataMsgViaSpanningTree sends a block DataMsg immediately to spanning-tree children.
+// When allowFallback is true and the tree has no eligible children, it returns false so the
+// caller can use classic gossip fan-out.
+func (g *Node) sendDataMsgViaSpanningTree(msg *protoext.SignedGossipMessage, peerFilter func(common.PKIidType) bool, allowFallback bool, routing filter.RoutingFilter) bool {
+	if msg == nil || msg.GossipMessage == nil || !g.spanningTree.Enabled() {
+		return false
+	}
+	channel := string(msg.Channel)
+	if channel == "" {
+		return false
+	}
+
+	alive := make(map[string]struct{})
+	membership := g.disc.GetMembership()
+	for _, member := range membership {
+		alive[string(member.PKIid)] = struct{}{}
+	}
+	g.spanningTree.Prune(channel, alive)
+
+	var eligiblePeers []*comm.RemotePeer
+	if routing != nil {
+		eligiblePeers = filter.SelectPeers(len(membership), membership, routing)
+	} else {
+		eligiblePeers = g.remotePeersFromMembership(membership)
+	}
+	peers2Send := g.spanningTree.selectPeers(channel, eligiblePeers)
+
+	if peerFilter != nil {
+		filtered := make([]*comm.RemotePeer, 0, len(peers2Send))
+		for _, peer := range peers2Send {
+			if peerFilter(peer.PKIID) {
+				filtered = append(filtered, peer)
+			}
+		}
+		peers2Send = filtered
+	}
+
+	if len(peers2Send) > 0 {
+		g.comm.Send(msg, peers2Send...)
+		return true
+	}
+
+	if !allowFallback {
+		return true
+	}
+	// No children yet: leave dissemination to classic gossip while the tree forms.
+	return false
+}
+
+func (g *Node) channelBlockRoutingFilter(channelID common.ChannelID) filter.RoutingFilter {
+	gc := g.chanState.getGossipChannelByChainID(channelID)
+	if gc == nil {
+		return g.IsInMyOrg
+	}
+	return filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, g.IsInMyOrg)
 }
 
 // removeSelfLoop deletes from the list of peers peer which has sent the message
@@ -736,7 +898,7 @@ func (g *Node) SendByCriteria(msg *protoext.SignedGossipMessage, criteria SendCr
 }
 
 func (g *Node) shouldRouteViaSpanningTree(msg *pg.GossipMessage) bool {
-	if g.spanningTree == nil || msg == nil || !protoext.IsDataMsg(msg) {
+	if !g.spanningTree.Enabled() || msg == nil || !protoext.IsDataMsg(msg) {
 		return false
 	}
 
@@ -784,12 +946,21 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 	if g.conf.PropagateIterations == 0 {
 		return
 	}
+
+	// Block commit DataMsgs: send immediately to spanning-tree children (no batching delay).
+	if g.shouldRouteViaSpanningTree(msg) {
+		if g.sendDataMsgViaSpanningTree(sMsg, nil, true, g.channelBlockRoutingFilter(msg.Channel)) {
+			return
+		}
+		// Fall back to classic batched gossip while the tree is incomplete.
+	}
+
 	g.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage: sMsg,
 		filter: func(_ common.PKIidType) bool {
 			return true
 		},
-		routeViaSpanningTree: g.shouldRouteViaSpanningTree(msg),
+		routeViaSpanningTree: false,
 	})
 }
 

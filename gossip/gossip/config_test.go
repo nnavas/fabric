@@ -94,8 +94,12 @@ func TestGlobalConfig(t *testing.T) {
 		AliveExpirationTimeout:       21 * time.Second,
 		AliveExpirationCheckInterval: 21 * time.Second / 10, // AliveExpirationTimeout / 10
 		ReconnectInterval:            22 * time.Second,
-		MaxConnectionAttempts:        100,
-		MsgExpirationFactor:          10,
+		MaxConnectionAttempts:         100,
+		MsgExpirationFactor:           10,
+		EnableSpanningTree:            false,
+		SpanningTreePropagateInterval: 5 * time.Second,
+		MaxSpanningTreeFanout:         8,
+		MaxSpanningTreeDistance:       16,
 	}
 
 	require.Equal(t, expectedConfig, coreConfig)
@@ -147,9 +151,13 @@ func TestGlobalConfigDefaults(t *testing.T) {
 		AliveTimeInterval:            discovery.DefAliveTimeInterval,
 		AliveExpirationTimeout:       5 * discovery.DefAliveTimeInterval,
 		AliveExpirationCheckInterval: 5 * discovery.DefAliveTimeInterval / 10,
-		ReconnectInterval:            5 * discovery.DefAliveTimeInterval,
-		MaxConnectionAttempts:        120,
-		MsgExpirationFactor:          20,
+		ReconnectInterval:             5 * discovery.DefAliveTimeInterval,
+		MaxConnectionAttempts:         120,
+		MsgExpirationFactor:           20,
+		EnableSpanningTree:            false,
+		SpanningTreePropagateInterval: 5 * time.Second,
+		MaxSpanningTreeFanout:         8,
+		MaxSpanningTreeDistance:       16,
 	}
 
 	require.Equal(t, expectedConfig, coreConfig)

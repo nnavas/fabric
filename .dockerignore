@@ -18,3 +18,5 @@ docs
 images
 release_notes
 vagrant
+!build/bin/orderer
+!build/bin/peer

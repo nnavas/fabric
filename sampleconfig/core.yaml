@@ -138,6 +138,16 @@ peer:
     propagateIterations: 1
     # Number of peers selected to push messages to
     propagatePeerNum: 3
+    # When true, channel leaders advertise a spanning tree and block DataMsgs
+    # are pushed immediately along tree children (with classic gossip fallback
+    # while the tree is incomplete). Requires blockGossipEnabled=true to matter.
+    enableSpanningTree: false
+    # How often a channel spanning-tree root re-advertises its presence
+    spanningTreePropagateInterval: 5s
+    # Max children that receive a tree-routed block at each hop
+    maxSpanningTreeFanout: 8
+    # Max hop distance accepted from the spanning-tree root
+    maxSpanningTreeDistance: 16
     # Determines frequency of pull phases(unit: second)
     # Must be greater than digestWaitTime + responseWaitTime
     pullInterval: 4s

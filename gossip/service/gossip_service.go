@@ -107,6 +107,10 @@ type gossipSvc interface {
 	// IsInMyOrg checks whether a network member is in this peer's org
 	IsInMyOrg(member discovery.NetworkMember) bool
 
+	// SetSpanningTreeRoot marks this peer as the spanning-tree root for block dissemination
+	// on the given channel when spanning-tree routing is enabled.
+	SetSpanningTreeRoot(channelID common.ChannelID, isRoot bool)
+
 	// Stop stops the gossip component
 	Stop()
 }
@@ -424,6 +428,7 @@ func (g *GossipService) InitializeChannel(
 				support.Committer), g.metrics.ElectionMetrics)
 		} else if isStaticOrgLeader {
 			logger.Debug("This peer is configured to connect to ordering service for blocks delivery, channel", channelID)
+			g.gossipSvc.SetSpanningTreeRoot(common.ChannelID(channelID), true)
 			g.deliveryService[channelID].StartDeliverForChannel(channelID, support.Committer, func() {})
 		} else {
 			logger.Debug("This peer is not configured to connect to ordering service for blocks delivery, channel", channelID)
@@ -530,11 +535,13 @@ func (g *GossipService) onStatusChangeFactory(channelID string, committer blocks
 				le.Yield()
 			}
 			logger.Info("Elected as a leader, starting delivery service for channel", channelID)
+			g.gossipSvc.SetSpanningTreeRoot(common.ChannelID(channelID), true)
 			if err := g.deliveryService[channelID].StartDeliverForChannel(channelID, committer, yield); err != nil {
 				logger.Errorf("Delivery service is not able to start blocks delivery for chain, due to %+v", err)
 			}
 		} else {
 			logger.Info("Renounced leadership, stopping delivery service for channel", channelID)
+			g.gossipSvc.SetSpanningTreeRoot(common.ChannelID(channelID), false)
 			if err := g.deliveryService[channelID].StopDeliverForChannel(); err != nil {
 				logger.Errorf("Delivery service is not able to stop blocks delivery for chain, due to %+v", err)
 			}

@@ -97,6 +97,15 @@ type Config struct {
 	MsgExpirationFactor int
 	// MaxConnectionAttempts is the max number of attempts to connect to a peer (wait for alive ack)
 	MaxConnectionAttempts int
+
+	// EnableSpanningTree enables spanning-tree routing for channel block DataMsgs.
+	EnableSpanningTree bool
+	// SpanningTreePropagateInterval is how often a channel root re-advertises the spanning tree.
+	SpanningTreePropagateInterval time.Duration
+	// MaxSpanningTreeFanout caps how many children receive a tree-routed block at each hop.
+	MaxSpanningTreeFanout int
+	// MaxSpanningTreeDistance rejects advertisements beyond this hop distance from the root.
+	MaxSpanningTreeDistance int
 }
 
 // GlobalConfig builds a Config from the given endpoint, certificate and bootstrap peers.
@@ -148,6 +157,10 @@ func (c *Config) loadConfig(endpoint string, certs *common.TLSCertificates, boot
 	c.ReconnectInterval = util.GetDurationOrDefault("peer.gossip.reconnectInterval", c.AliveExpirationTimeout)
 	c.MaxConnectionAttempts = util.GetIntOrDefault("peer.gossip.maxConnectionAttempts", discovery.DefMaxConnectionAttempts)
 	c.MsgExpirationFactor = util.GetIntOrDefault("peer.gossip.msgExpirationFactor", discovery.DefMsgExpirationFactor)
+	c.EnableSpanningTree = viper.GetBool("peer.gossip.enableSpanningTree")
+	c.SpanningTreePropagateInterval = util.GetDurationOrDefault("peer.gossip.spanningTreePropagateInterval", defSpanningTreePropagateInterval)
+	c.MaxSpanningTreeFanout = util.GetIntOrDefault("peer.gossip.maxSpanningTreeFanout", defMaxSpanningTreeFanout)
+	c.MaxSpanningTreeDistance = util.GetIntOrDefault("peer.gossip.maxSpanningTreeDistance", defMaxSpanningTreeDistance)
 
 	return nil
 }

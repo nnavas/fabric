@@ -109,6 +109,8 @@ func (*gossipMock) IsInMyOrg(member discovery.NetworkMember) bool {
 	panic("implement me")
 }
 
+func (*gossipMock) SetSpanningTreeRoot(channelID common.ChannelID, isRoot bool) {}
+
 func (*gossipMock) Stop() {
 	panic("implement me")
 }

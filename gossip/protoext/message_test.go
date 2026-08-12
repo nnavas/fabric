@@ -436,3 +436,21 @@ func TestGossipMessageLeadershipMessageTagType(t *testing.T) {
 	}
 	require.Error(t, protoext.IsTagLegal(msg))
 }
+
+func TestGossipMessageSpanningTreeTagType(t *testing.T) {
+	msg := &gossip.GossipMessage{
+		Tag: gossip.GossipMessage_CHAN_AND_ORG,
+		Content: &gossip.GossipMessage_SpanningTree{
+			SpanningTree: &gossip.SpanningTreeMsg{},
+		},
+	}
+	require.NoError(t, protoext.IsTagLegal(msg))
+
+	msg = &gossip.GossipMessage{
+		Tag: gossip.GossipMessage_EMPTY,
+		Content: &gossip.GossipMessage_SpanningTree{
+			SpanningTree: &gossip.SpanningTreeMsg{},
+		},
+	}
+	require.Error(t, protoext.IsTagLegal(msg))
+}

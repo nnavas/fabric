@@ -169,10 +169,18 @@ func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
 		return
 	}
 
+	filterFn := msg.GetConnectionInfo().ID.IsNotSameFilter
+	// Block DataMsgs: forward immediately along the spanning tree to avoid batching latency.
+	if ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage) {
+		if ga.Node.sendDataMsgViaSpanningTree(gossipMsg, filterFn, true, ga.Node.channelBlockRoutingFilter(gossipMsg.Channel)) {
+			return
+		}
+	}
+
 	ga.Node.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage:  gossipMsg,
-		filter:               msg.GetConnectionInfo().ID.IsNotSameFilter,
-		routeViaSpanningTree: ga.Node.shouldRouteViaSpanningTree(gossipMsg.GossipMessage),
+		filter:               filterFn,
+		routeViaSpanningTree: false,
 	})
 }
 

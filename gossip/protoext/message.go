@@ -188,8 +188,8 @@ func IsTagLegal(m *gossip.GossipMessage) error {
 	}
 
 	if IsSpanningTreeMsg(m) {
-		if m.Tag != gossip.GossipMessage_EMPTY {
-			return fmt.Errorf("Tag should be %s", gossip.GossipMessage_Tag_name[int32(gossip.GossipMessage_EMPTY)])
+		if m.Tag != gossip.GossipMessage_CHAN_AND_ORG {
+			return fmt.Errorf("Tag should be %s", gossip.GossipMessage_Tag_name[int32(gossip.GossipMessage_CHAN_AND_ORG)])
 		}
 		return nil
 	}
