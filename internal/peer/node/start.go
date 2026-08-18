@@ -192,6 +192,8 @@ func (c custodianLauncherAdapter) Stop(ccid string) error {
 func serve(args []string) error {
 	logger.Infof("Starting %s", version.GetInfo())
 
+	logger.Infof("Peer with org leader multicast")
+
 	// Info logging for peer config, includes core.yaml settings and environment variable overrides
 	allSettings := viper.AllSettings()
 	settingsYaml, err := yaml.Marshal(allSettings)
