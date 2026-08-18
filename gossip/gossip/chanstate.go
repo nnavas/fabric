@@ -164,8 +164,18 @@ func (ga *gossipAdapterImpl) Gossip(msg *protoext.SignedGossipMessage) {
 
 // Forward sends message to the next hops
 func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
+	gossipMsg := msg.GetGossipMessage()
+	if gossipMsg == nil {
+		return
+	}
+	// Recipients of org-disseminated blocks must not re-gossip them.
+	// The originating channel org leader already pushed the block to every
+	// other same-org channel peer.
+	if ga.Node.orgBlockDisseminationEnabled(gossipMsg.GossipMessage) {
+		return
+	}
 	ga.Node.emitter.Add(&emittedGossipMessage{
-		SignedGossipMessage: msg.GetGossipMessage(),
+		SignedGossipMessage: gossipMsg,
 		filter:              msg.GetConnectionInfo().ID.IsNotSameFilter,
 	})
 }

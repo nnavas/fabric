@@ -32,6 +32,10 @@ type Config struct {
 	PropagateIterations int
 	// PropagatePeerNum is the number of peers selected to push messages to.
 	PropagatePeerNum int
+	// OrgBlockDissemination, when true, has the peer that originates a block
+	// DataMsg (the channel org leader) push it immediately to every other peer
+	// in the same channel and organization. Recipients do not re-gossip blocks.
+	OrgBlockDissemination bool
 
 	// MaxBlockCountToStore is the maximum count of blocks we store in memory.
 	MaxBlockCountToStore int
@@ -124,6 +128,10 @@ func (c *Config) loadConfig(endpoint string, certs *common.TLSCertificates, boot
 	c.MaxPropagationBurstSize = util.GetIntOrDefault("peer.gossip.maxPropagationBurstSize", 10)
 	c.PropagateIterations = util.GetIntOrDefault("peer.gossip.propagateIterations", 1)
 	c.PropagatePeerNum = util.GetIntOrDefault("peer.gossip.propagatePeerNum", 3)
+	c.OrgBlockDissemination = true
+	if viper.IsSet("peer.gossip.orgBlockDissemination") {
+		c.OrgBlockDissemination = viper.GetBool("peer.gossip.orgBlockDissemination")
+	}
 	c.PullInterval = util.GetDurationOrDefault("peer.gossip.pullInterval", 4*time.Second)
 	c.PullPeerNum = util.GetIntOrDefault("peer.gossip.pullPeerNum", 3)
 	c.InternalEndpoint = endpoint

@@ -589,10 +589,13 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 			continue
 		}
 		// Select the peers to send the messages to
-		// For leadership messages we will select all peers that pass routing factory - e.g. all peers in channel and org
+		// Leadership messages go to all peers in the channel and org.
+		// Block DataMsgs do the same when org-block dissemination is enabled:
+		// one originating peer (the channel org leader) pushes the block to
+		// every remaining same-org channel peer instead of a random fan-out.
 		membership := g.disc.GetMembership()
 		var peers2Send []*comm.RemotePeer
-		if protoext.IsLeadershipMsg(messagesOfChannel[0].GossipMessage) {
+		if protoext.IsLeadershipMsg(messagesOfChannel[0].GossipMessage) || g.orgBlockDisseminationEnabled(messagesOfChannel[0].GossipMessage) {
 			peers2Send = filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
 		} else {
 			peers2Send = filter.SelectPeers(g.conf.PropagatePeerNum, membership, chanRoutingFactory(gc))
@@ -705,12 +708,60 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 	if g.conf.PropagateIterations == 0 {
 		return
 	}
+
+	// Channel org leaders originate block DataMsgs after pulling from the orderer.
+	// Push immediately to every other same-org channel peer (no batch delay, no random fan-out).
+	if g.orgBlockDisseminationEnabled(msg) {
+		if g.disseminateBlockToOrg(sMsg, nil) {
+			return
+		}
+	}
+
 	g.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage: sMsg,
 		filter: func(_ common.PKIidType) bool {
 			return true
 		},
 	})
+}
+
+func (g *Node) orgBlockDisseminationEnabled(msg *pg.GossipMessage) bool {
+	if g.conf == nil || !g.conf.OrgBlockDissemination || msg == nil || !protoext.IsDataMsg(msg) {
+		return false
+	}
+	dataMsg := msg.GetDataMsg()
+	return dataMsg != nil && dataMsg.Payload != nil && len(msg.Channel) > 0
+}
+
+// disseminateBlockToOrg sends a block DataMsg to every eligible peer in the
+// same channel and organization. Returns false if no such peers are known yet
+// so the caller can fall back to batched gossip.
+func (g *Node) disseminateBlockToOrg(msg *protoext.SignedGossipMessage, peerFilter func(common.PKIidType) bool) bool {
+	if msg == nil || msg.GossipMessage == nil || g.disc == nil || g.comm == nil {
+		return false
+	}
+	gc := g.chanState.getGossipChannelByChainID(msg.Channel)
+	if gc == nil {
+		return false
+	}
+	membership := g.disc.GetMembership()
+	peers2Send := filter.SelectPeers(len(membership), membership,
+		filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, g.IsInMyOrg))
+	if peerFilter != nil {
+		filtered := make([]*comm.RemotePeer, 0, len(peers2Send))
+		for _, peer := range peers2Send {
+			if peerFilter(peer.PKIID) {
+				filtered = append(filtered, peer)
+			}
+		}
+		peers2Send = filtered
+	}
+	if len(peers2Send) == 0 {
+		return false
+	}
+	g.logger.Debugf("Disseminating block to %d same-org channel peers on %s", len(peers2Send), string(msg.Channel))
+	g.comm.Send(msg, peers2Send...)
+	return true
 }
 
 // Send sends a message to remote peers

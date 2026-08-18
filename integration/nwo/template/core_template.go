@@ -37,6 +37,7 @@ peer:
     maxPropagationBurstSize: 10
     propagateIterations: 1
     propagatePeerNum: 3
+    orgBlockDissemination: true
     pullInterval: 4s
     pullPeerNum: 3
     requestStateInfoInterval: 4s

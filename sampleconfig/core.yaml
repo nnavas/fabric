@@ -138,6 +138,11 @@ peer:
     propagateIterations: 1
     # Number of peers selected to push messages to
     propagatePeerNum: 3
+    # When true, the peer that originates a block DataMsg (the channel org
+    # leader that pulled the block from the orderer) pushes it immediately to
+    # every other peer in the same channel and organization. Recipients do not
+    # re-gossip the block. Reduces hop count, redundant traffic, and commit latency.
+    orgBlockDissemination: true
     # Determines frequency of pull phases(unit: second)
     # Must be greater than digestWaitTime + responseWaitTime
     pullInterval: 4s
