@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/gossip/comm"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/discovery"
+	"github.com/hyperledger/fabric/gossip/filter"
 	"github.com/hyperledger/fabric/gossip/gossip/channel"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/protoext"
@@ -162,10 +163,35 @@ func (ga *gossipAdapterImpl) Gossip(msg *protoext.SignedGossipMessage) {
 	})
 }
 
-// Forward sends message to the next hops
+// Forward sends message to the next hops.
+// Block commit DataMsgs are pushed immediately to multicast-tree children
+// so they do not wait in the batching emitter.
 func (ga *gossipAdapterImpl) Forward(msg protoext.ReceivedMessage) {
+	gossipMsg := msg.GetGossipMessage()
+	if gossipMsg == nil || gossipMsg.GossipMessage == nil {
+		return
+	}
+
+	if ga.Node.conf != nil && ga.Node.conf.PropagateIterations == 0 {
+		return
+	}
+
+	if isBlockCommitMsg(gossipMsg.GossipMessage) {
+		var sender common.PKIidType
+		if info := msg.GetConnectionInfo(); info != nil {
+			sender = info.ID
+		}
+		var rf filter.RoutingFilter
+		if gc := ga.Node.chanState.getGossipChannelByChainID(gossipMsg.Channel); gc != nil {
+			rf = filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, ga.Node.IsInMyOrg)
+		}
+		// Leaves have no children; do not fall back to random push gossip.
+		ga.Node.disseminateBlockViaTree(gossipMsg, sender, rf)
+		return
+	}
+
 	ga.Node.emitter.Add(&emittedGossipMessage{
-		SignedGossipMessage: msg.GetGossipMessage(),
+		SignedGossipMessage: gossipMsg,
 		filter:              msg.GetConnectionInfo().ID.IsNotSameFilter,
 	})
 }

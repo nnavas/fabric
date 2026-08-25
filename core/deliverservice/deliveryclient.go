@@ -250,7 +250,7 @@ func (d *deliverServiceImpl) createBlockDelivererBFT(chainID string, ledgerInfo 
 		ChannelID: chainID,
 		BlockHandler: &GossipBlockHandler{
 			gossip:              d.conf.Gossip,
-			blockGossipDisabled: true, // Block gossip is deprecated since in v2.2 and is no longer supported in v3.x
+			blockGossipDisabled: !d.conf.DeliverServiceConfig.BlockGossipEnabled,
 			logger:              flogging.MustGetLogger("peer.blocksprovider").With("channel", chainID),
 		},
 		Ledger:                 ledgerInfo,

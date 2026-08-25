@@ -191,6 +191,7 @@ func (c custodianLauncherAdapter) Stop(ccid string) error {
 
 func serve(args []string) error {
 	logger.Infof("Starting %s", version.GetInfo())
+	logger.Info("Using multicast-tree dissemination algorithm for block commit messages")
 
 	// Info logging for peer config, includes core.yaml settings and environment variable overrides
 	allSettings := viper.AllSettings()

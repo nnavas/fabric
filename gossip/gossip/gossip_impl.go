@@ -594,12 +594,18 @@ func (g *Node) gossipInChan(messages []*emittedGossipMessage, chanRoutingFactory
 		var peers2Send []*comm.RemotePeer
 		if protoext.IsLeadershipMsg(messagesOfChannel[0].GossipMessage) {
 			peers2Send = filter.SelectPeers(len(membership), membership, chanRoutingFactory(gc))
-		} else {
+		} else if !isBlockCommitMsg(messagesOfChannel[0].GossipMessage) {
 			peers2Send = filter.SelectPeers(g.conf.PropagatePeerNum, membership, chanRoutingFactory(gc))
 		}
 
-		// Send the messages to the remote peers
+		// Send the messages to the remote peers.
+		// Block commit DataMsgs use a source-rooted multicast tree so
+		// each hop only forwards to its children (see disseminateBlockViaTree).
 		for _, msg := range messagesOfChannel {
+			if isBlockCommitMsg(msg.GossipMessage) {
+				g.disseminateBlockViaTree(msg.SignedGossipMessage, nil, chanRoutingFactory(gc))
+				continue
+			}
 			filteredPeers := g.removeSelfLoop(msg, peers2Send)
 			g.comm.Send(msg.SignedGossipMessage, filteredPeers...)
 		}
@@ -691,6 +697,13 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 		return
 	}
 
+	// Stamp the originator's PKI-ID into Nonce so every hop reconstructs
+	// the same source-rooted multicast tree.
+	if isBlockCommitMsg(msg) && g.comm != nil {
+		msg.Nonce = pkiIDToNonce(g.comm.GetPKIid())
+		sMsg.GossipMessage = msg
+	}
+
 	if protoext.IsChannelRestricted(msg) {
 		gc := g.chanState.getGossipChannelByChainID(msg.Channel)
 		if gc == nil {
@@ -705,12 +718,53 @@ func (g *Node) Gossip(msg *pg.GossipMessage) {
 	if g.conf.PropagateIterations == 0 {
 		return
 	}
+
+	// Block commits skip the batching emitter: each hop of the multicast
+	// tree would otherwise wait up to MaxPropagationBurstLatency.
+	if isBlockCommitMsg(msg) {
+		if g.disseminateBlockViaTree(sMsg, nil, nil) {
+			return
+		}
+	}
+
 	g.emitter.Add(&emittedGossipMessage{
 		SignedGossipMessage: sMsg,
 		filter: func(_ common.PKIidType) bool {
 			return true
 		},
 	})
+}
+
+// disseminateBlockViaTree pushes a block DataMsg to this peer's children in
+// the source-rooted intra-org multicast tree. exclude is the peer that just
+// delivered the block (never forwarded back). rf, when nil, is the default
+// same-org channel eligibility filter. Returns false when no children are
+// known so the caller can fall back to batched gossip.
+func (g *Node) disseminateBlockViaTree(msg *protoext.SignedGossipMessage, exclude common.PKIidType, rf filter.RoutingFilter) bool {
+	if msg == nil || msg.GossipMessage == nil || g.disc == nil || g.comm == nil {
+		return false
+	}
+	if rf == nil {
+		gc := g.chanState.getGossipChannelByChainID(msg.Channel)
+		if gc == nil {
+			return false
+		}
+		rf = filter.CombineRoutingFilters(gc.EligibleForChannel, gc.IsMemberInChan, g.IsInMyOrg)
+	}
+	self := g.disc.Self()
+	if len(self.PKIid) == 0 && g.comm != nil {
+		self.PKIid = g.comm.GetPKIid()
+	}
+	members := collectTreeMembers(self, g.disc.GetMembership(), rf)
+	root := resolveTreeRoot(msg.Nonce, members, self.PKIid)
+	children := multicastTreeChildren(members, self.PKIid, root, exclude)
+	if len(children) == 0 {
+		return false
+	}
+	g.logger.Debugf("Disseminating block on %s to %d multicast-tree children (membership=%d)",
+		string(msg.Channel), len(children), len(members))
+	g.comm.Send(msg, children...)
+	return true
 }
 
 // Send sends a message to remote peers
